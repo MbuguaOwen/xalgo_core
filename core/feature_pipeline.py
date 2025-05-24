@@ -5,11 +5,11 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from collections import deque
+from core.adaptive_filters import EWMA, KalmanFilter
 
-# ─────────────────────────────────────────────────────────
-# 🔧 Parameters for rolling z-score and volatility
-# ─────────────────────────────────────────────────────────
 Z_SCORE_WINDOW = 100
+kalman = KalmanFilter()
+ewma_mean = EWMA(alpha=0.05)
 
 
 def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window):
@@ -28,6 +28,10 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
         z_score = 0.0
         vol_spread = 0.0
 
+    # Apply filters
+    kalman_filtered = kalman.update(spread)
+    ewma_filtered = ewma_mean.update(spread)
+
     return {
         "btc_usd": btc_price,
         "eth_usd": eth_price,
@@ -35,12 +39,13 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
         "implied_ethbtc": implied_ethbtc,
         "spread": spread,
         "spread_zscore": z_score,
-        "vol_spread": vol_spread
+        "vol_spread": vol_spread,
+        "spread_kalman": kalman_filtered,
+        "spread_ewma": ewma_filtered
     }
 
 
 def generate_features_from_csvs(csv_paths):
-    # Batch mode for historical CSVs
     btc_df = pd.read_csv(csv_paths["BTCUSDT"], parse_dates=["open_time"])
     eth_df = pd.read_csv(csv_paths["ETHUSDT"], parse_dates=["open_time"])
     ethbtc_df = pd.read_csv(csv_paths["ETHBTC"], parse_dates=["open_time"])
@@ -65,5 +70,4 @@ def generate_features_from_csvs(csv_paths):
 
 
 def generate_live_features(btc_price, eth_price, ethbtc_price, spread_window):
-    # Live mode: single-tick input
     return compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)

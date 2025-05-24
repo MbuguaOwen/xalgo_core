@@ -7,3 +7,8 @@ prometheus_client
 websockets
 termcolor
 streamlit
+pykalman
+matplotlib
+tqdm
+aiohttp
+
