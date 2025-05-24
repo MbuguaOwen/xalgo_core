@@ -6,3 +6,4 @@ joblib
 prometheus_client
 websockets
 termcolor
+streamlit
