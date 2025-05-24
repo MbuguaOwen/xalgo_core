@@ -1,0 +1,56 @@
+# .gitignore – XAlgo Core Project
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Logs & Outputs
+logs/
+*.log
+*.csv
+*.json
+
+# Models
+*.pkl
+
+# System Files
+.DS_Store
+Thumbs.db
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Docker
+**/__pycache__
+**/.pytest_cache
+
+# Coverage & Testing
+.coverage
+.tox/
+htmlcov/
+
+# Bytecode cache
+*.pyc
+*.pyo
+__pycache__/
+
+# Mac/Linux filesystem
+.svn/
+
+# Optional
+*.bak
+*.tmp
