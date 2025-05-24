@@ -11,4 +11,4 @@ pykalman
 matplotlib
 tqdm
 aiohttp
-
+xgboost
