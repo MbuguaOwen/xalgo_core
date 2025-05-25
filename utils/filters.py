@@ -73,7 +73,7 @@ class MLFilter:
             signal = -1 if predicted_class == 0 else 1
 
             if debug:
-                logging.debug(f"[MLFilter] 📥 Input: {x_input.to_dict(orient='records')[0]}")
+                logging.debug(f"[MLFilter] 📅 Input: {x_input.to_dict(orient='records')[0]}")
                 logging.debug(
                     f"[MLFilter] 🔍 Prediction: class={predicted_class}, "
                     f"signal={signal}, confidence={confidence:.4f}"

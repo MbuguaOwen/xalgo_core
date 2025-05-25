@@ -10,13 +10,13 @@ os.makedirs("logs", exist_ok=True)
 if not os.path.exists(LOG_FILE):
     with open(LOG_FILE, mode="w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["timestamp", "entry_price", "confidence", "model_signal", "final_decision", "reason"])
+        writer.writerow(["timestamp", "entry_price", "confidence", "model_signal", "final_decision", "reason", "profit"])
 
-def log_signal_event(timestamp, entry_price, confidence, model_signal, final_decision, reason):
+def log_signal_event(timestamp, entry_price, confidence, model_signal, final_decision, reason, profit=None):
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, mode="w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["timestamp", "entry_price", "confidence", "model_signal", "final_decision", "reason"])
+            writer.writerow(["timestamp", "entry_price", "confidence", "model_signal", "final_decision", "reason", "profit"])
 
     with open(LOG_FILE, mode="a", newline="") as f:
         writer = csv.writer(f)
@@ -26,5 +26,6 @@ def log_signal_event(timestamp, entry_price, confidence, model_signal, final_dec
             round(confidence, 4),
             model_signal,
             final_decision,
-            reason
+            reason,
+            round(profit, 6) if profit is not None else ""
         ])

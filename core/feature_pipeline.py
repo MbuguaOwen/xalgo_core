@@ -10,7 +10,6 @@ Z_SCORE_WINDOW = 100
 kalman = KalmanFilter()
 ewma_mean = EWMA(alpha=0.05)
 
-
 def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window):
     implied_ethbtc = eth_price / btc_price
     spread = implied_ethbtc - ethbtc_price
@@ -27,26 +26,37 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
         z_score = 0.0
         vol_spread = 0.0
 
-    # Apply filters
     kalman_filtered = kalman.update(spread)
     ewma_filtered = ewma_mean.update(spread)
 
-    # ✅ Add expected direction logic (aligned with triple-barrier model)
-    direction = 1 if spread < 0 else -1
+    direction = 1 if spread < 0 else 0
+
+    # Compute leader features
+    z_btc = pd.Series([btc_price]).pct_change().fillna(0).iloc[0]
+    z_eth = pd.Series([eth_price]).pct_change().fillna(0).iloc[0]
+    z_btc_prev = 0.0  # live mode simplification
+    z_eth_prev = 0.0
+    vol_btc = np.std(spread_window) if len(spread_window) > 1 else 0.0
+    vol_eth = np.std(spread_window) if len(spread_window) > 1 else 0.0
 
     return {
-        "btc_usd": btc_price,
-        "eth_usd": eth_price,
-        "eth_btc": ethbtc_price,
+        "btc_price": btc_price,
+        "eth_price": eth_price,
+        "ethbtc_price": ethbtc_price,
         "implied_ethbtc": implied_ethbtc,
         "spread": spread,
         "spread_zscore": z_score,
         "vol_spread": vol_spread,
         "spread_kalman": kalman_filtered,
         "spread_ewma": ewma_filtered,
-        "direction": direction
+        "direction": direction,
+        "z_btc": z_btc,
+        "z_eth": z_eth,
+        "z_btc_prev": z_btc_prev,
+        "z_eth_prev": z_eth_prev,
+        "vol_btc": vol_btc,
+        "vol_eth": vol_eth
     }
-
 
 def generate_features_from_csvs(csv_paths):
     btc_df = pd.read_csv(csv_paths["BTCUSDT"], parse_dates=["open_time"])
@@ -70,7 +80,6 @@ def generate_features_from_csvs(csv_paths):
         features.append(f)
 
     return pd.DataFrame(features)
-
 
 def generate_live_features(btc_price, eth_price, ethbtc_price, spread_window):
     return compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
