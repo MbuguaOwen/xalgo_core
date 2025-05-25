@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – ML Signal Engine with Cluster Guard & Binary Directional Filter
+# main.py – ML Signal Engine with Cluster Guard & Binary Directional Filter (Corrected Logic)
 
 import asyncio
 import logging
@@ -37,7 +37,7 @@ spread_windows = {
 }
 
 # ─────────────────────────────────────────────
-# 🧠 Spread & Direction Inference
+# 🧠 Spread Evaluation & Signal Direction (Corrected)
 # ─────────────────────────────────────────────
 def evaluate_triangle_paths(btc_price, eth_price, ethbtc_price):
     implied_ethbtc_A = eth_price / btc_price
@@ -49,10 +49,11 @@ def evaluate_triangle_paths(btc_price, eth_price, ethbtc_price):
     profit_B = (eth_price / ethbtc_price) / btc_price
 
     if profit_A > profit_B:
-        direction = -1 if spread_A > 0 else 1
+        # Expect reversion → if spread below 0, go long; if above 0, go short
+        direction = 1 if spread_A < 0 else -1
         return "ETH/USDT", spread_A, eth_price, direction
     else:
-        direction = -1 if spread_B > 0 else 1
+        direction = 1 if spread_B < 0 else -1
         return "BTC/USDT", spread_B, btc_price, direction
 
 def detect_regime(spread_zscore, vol_spread):
