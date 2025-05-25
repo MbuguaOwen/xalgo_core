@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – ML Signal Engine with Cluster Guard & Binary Directional Filter (Corrected Logic)
+# main.py – ML Signal Engine with Smart Cluster Guard, Optimized Entry, and Trade Lifecycle Monitoring
 
 import asyncio
 import logging
@@ -17,12 +17,11 @@ from core.execution_engine import execute_trade
 from core.trade_logger import log_signal_event
 from data.binance_ingestor import BinanceIngestor
 
-# ─────────────────────────────────────────────
-# 🔧 Config
-# ─────────────────────────────────────────────
+# ─── Config ───
 MODEL_PATH = "ml_model/triangular_rf_model.pkl"
-CONFIDENCE_THRESHOLD = 0.97
-executed_signals = deque(maxlen=10)
+CONFIDENCE_THRESHOLD = 0.93
+executed_signals = deque(maxlen=50)
+active_trades = {}
 
 WINDOW_MAP = {
     "volatile": 30,
@@ -36,25 +35,12 @@ spread_windows = {
     "trending": deque(maxlen=WINDOW_MAP["trending"])
 }
 
-# ─────────────────────────────────────────────
-# 🧠 Spread Evaluation & Signal Direction (Corrected)
-# ─────────────────────────────────────────────
+# ─── Signal Direction and Regime ───
 def evaluate_triangle_paths(btc_price, eth_price, ethbtc_price):
-    implied_ethbtc_A = eth_price / btc_price
-    spread_A = implied_ethbtc_A - ethbtc_price
-    profit_A = (btc_price * ethbtc_price) / eth_price
-
-    implied_ethbtc_B = btc_price / eth_price
-    spread_B = implied_ethbtc_B - (1 / ethbtc_price)
-    profit_B = (eth_price / ethbtc_price) / btc_price
-
-    if profit_A > profit_B:
-        # Expect reversion → if spread below 0, go long; if above 0, go short
-        direction = 1 if spread_A < 0 else -1
-        return "ETH/USDT", spread_A, eth_price, direction
-    else:
-        direction = 1 if spread_B < 0 else -1
-        return "BTC/USDT", spread_B, btc_price, direction
+    implied_ethbtc = eth_price / btc_price
+    spread = implied_ethbtc - ethbtc_price
+    direction = 1 if spread < 0 else -1
+    return spread, direction
 
 def detect_regime(spread_zscore, vol_spread):
     if vol_spread > 0.000004:
@@ -64,42 +50,55 @@ def detect_regime(spread_zscore, vol_spread):
     else:
         return "trending"
 
-# ─────────────────────────────────────────────
-# 🔁 Tick Handler
-# ─────────────────────────────────────────────
-try:
-    ml_filter = MLFilter(model_path=MODEL_PATH)
-except Exception as e:
-    logging.error(f"[MLFilter] ❌ Error loading model: {e}")
-    sys.exit(1)
+# ─── Trade Execution Logic ───
+def execute_triangular_trade(signal_type, timestamp, spread, entry_price):
+    if signal_type == 1:
+        long_leg = "ETHUSDT"
+        short_leg = "BTCUSDT"
+    else:
+        long_leg = "BTCUSDT"
+        short_leg = "ETHUSDT"
+
+    execute_trade(signal_type=1, pair=long_leg, timestamp=timestamp, spread=spread, price=entry_price)
+    execute_trade(signal_type=-1, pair=short_leg, timestamp=timestamp, spread=spread, price=entry_price)
+    trade_id = f"{timestamp.isoformat()}_{signal_type}"
+    active_trades[trade_id] = {
+        "timestamp": timestamp,
+        "signal": signal_type,
+        "spread": spread,
+        "price": entry_price,
+        "long": long_leg,
+        "short": short_leg
+    }
+    return trade_id
+
+# ─── Smart Cluster Guard ───
+def should_block_by_cluster(signal, regime):
+    same_signals = [1 for _, s, _ in executed_signals if s == signal]
+    max_allowed = 5 if regime == "volatile" else 3
+    return len(same_signals) >= max_allowed
+
+# ─── Tick Handler ───
+ml_filter = MLFilter(model_path=MODEL_PATH)
 
 def process_tick(timestamp: datetime, btc_price: float, eth_price: float, ethbtc_price: float):
-    chosen_pair, spread, entry_price, expected_direction = evaluate_triangle_paths(
-        btc_price, eth_price, ethbtc_price
-    )
+    spread, expected_direction = evaluate_triangle_paths(btc_price, eth_price, ethbtc_price)
 
     if abs(spread) < 1e-6:
-        reason = "no_opportunity"
-        log_signal_event(timestamp, spread, 0.0, 0, 0, reason)
-        return
+        return  # no opportunity
 
     temp_window = deque(maxlen=200)
     _ = generate_live_features(btc_price, eth_price, ethbtc_price, temp_window)
-    if not temp_window:
-        return
-
     spread_z = temp_window[-1]
     vol = pd.Series(temp_window).std()
     regime = detect_regime(spread_z, vol)
     window = spread_windows[regime]
     features = generate_live_features(btc_price, eth_price, ethbtc_price, window)
 
-    if not features or any(k not in features for k in [
-        "implied_ethbtc", "spread", "spread_zscore", "vol_spread", "spread_ewma", "spread_kalman"
-    ]):
+    if not features:
         return
 
-    model_features = [
+    x_input = pd.DataFrame([[
         btc_price,
         eth_price,
         ethbtc_price,
@@ -108,54 +107,40 @@ def process_tick(timestamp: datetime, btc_price: float, eth_price: float, ethbtc
         features["spread_zscore"],
         features["vol_spread"],
         features["spread_ewma"],
-        features["spread_kalman"],
-        expected_direction
-    ]
-
-    x_input = pd.DataFrame([model_features], columns=[
+        features["spread_kalman"]
+    ]], columns=[
         "btc_usd", "eth_usd", "eth_btc",
         "implied_ethbtc", "spread", "spread_zscore",
-        "vol_spread", "spread_ewma", "spread_kalman", "direction"
+        "vol_spread", "spread_ewma", "spread_kalman"
     ])
 
-    confidence, signal = ml_filter.predict_with_confidence(x_input)
+    confidence, model_signal = ml_filter.predict_with_confidence(x_input)
 
-    same_signal_count = sum(
-        1 for t, s, p in executed_signals if s == signal and p == chosen_pair
-    )
-    max_cluster = 5 if regime == "volatile" else 3
+    if confidence >= CONFIDENCE_THRESHOLD and model_signal == expected_direction and not should_block_by_cluster(model_signal, regime):
+        trade_id = execute_triangular_trade(model_signal, timestamp, spread, eth_price if model_signal == 1 else btc_price)
+        executed_signals.append((timestamp, model_signal, trade_id))
 
-    logging.info(
-        f"📊 {timestamp} | Pair={chosen_pair} | Spread={spread:.5e} | "
-        f"Signal={signal} | Conf={confidence:.3f} | Match={signal == expected_direction} | Regime={regime}"
-    )
+        log_signal_event(
+            timestamp=timestamp,
+            entry_price=spread,
+            confidence=confidence,
+            model_signal=model_signal,
+            final_decision=1,
+            reason="model_approved"
+        )
+        logging.info(f"✅ APPROVED TRADE | {timestamp} | ID: {trade_id} | Signal: {model_signal} | Confidence: {confidence:.4f}")
 
-    if confidence >= CONFIDENCE_THRESHOLD and signal == expected_direction and same_signal_count < max_cluster:
-        reason = "model_approved"
-        execute_trade(signal_type=signal, pair=chosen_pair, timestamp=timestamp, spread=spread, price=entry_price)
-        executed_signals.append((timestamp, signal, chosen_pair))
-    elif same_signal_count >= max_cluster:
-        reason = "cluster_guard_blocked"
-    elif confidence >= CONFIDENCE_THRESHOLD:
-        reason = "direction_mismatch"
+    elif confidence >= CONFIDENCE_THRESHOLD and model_signal != expected_direction:
+        logging.info(f"⚠️ DIRECTION MISMATCH | Signal: {model_signal}, Expected: {expected_direction}")
+    elif should_block_by_cluster(model_signal, regime):
+        logging.info(f"🚫 BLOCKED BY CLUSTER GUARD | Signal: {model_signal}, Regime: {regime}")
     else:
-        reason = "low_confidence"
+        logging.info(f"❌ LOW CONFIDENCE | {confidence:.4f}")
 
-    log_signal_event(
-        timestamp=timestamp,
-        entry_price=spread,
-        confidence=confidence,
-        model_signal=signal,
-        final_decision=int(reason == "model_approved"),
-        reason=reason
-    )
-
-# ─────────────────────────────────────────────
-# 🚀 Launch
-# ─────────────────────────────────────────────
+# ─── Launch ───
 async def main():
     logging.basicConfig(level=logging.INFO)
-    logging.info("🚀 XAlgo Signal Engine starting (Binance WebSocket mode)...")
+    logging.info("🚀 XAlgo Smart Signal Engine Launching...")
     ingestor = BinanceIngestor()
     await ingestor.stream(process_tick)
 
