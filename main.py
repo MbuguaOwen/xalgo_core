@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – ML Signal Engine with Smart Cluster Guard, Optimized Entry, and Trade Lifecycle Monitoring
+# main.py – ML Signal Engine with Grand Signal Selection, Auto-Exit, and Lifecycle Precision
 
 import asyncio
 import logging
@@ -21,7 +21,9 @@ from data.binance_ingestor import BinanceIngestor
 MODEL_PATH = "ml_model/triangular_rf_model.pkl"
 CONFIDENCE_THRESHOLD = 0.93
 executed_signals = deque(maxlen=50)
+active_trade = None
 active_trades = {}
+last_signal = {"type": None, "timestamp": None, "confidence": 0.0}
 
 WINDOW_MAP = {
     "volatile": 30,
@@ -35,13 +37,7 @@ spread_windows = {
     "trending": deque(maxlen=WINDOW_MAP["trending"])
 }
 
-# ─── Signal Direction and Regime ───
-def evaluate_triangle_paths(btc_price, eth_price, ethbtc_price):
-    implied_ethbtc = eth_price / btc_price
-    spread = implied_ethbtc - ethbtc_price
-    direction = 1 if spread < 0 else -1
-    return spread, direction
-
+# ─── Utility Logic ───
 def detect_regime(spread_zscore, vol_spread):
     if vol_spread > 0.000004:
         return "volatile"
@@ -50,42 +46,72 @@ def detect_regime(spread_zscore, vol_spread):
     else:
         return "trending"
 
-# ─── Trade Execution Logic ───
-def execute_triangular_trade(signal_type, timestamp, spread, entry_price):
+def has_spread_reverted(current_spread: float, entry_spread: float, threshold: float = 0.5) -> bool:
+    return abs(current_spread) < abs(entry_spread) * threshold
+
+# ─── Smart Trade Execution ───
+def execute_triangular_trade(signal_type, timestamp, spread, btc_price, eth_price):
     if signal_type == 1:
         long_leg = "ETHUSDT"
         short_leg = "BTCUSDT"
+        long_price = eth_price
+        short_price = btc_price
     else:
         long_leg = "BTCUSDT"
         short_leg = "ETHUSDT"
+        long_price = btc_price
+        short_price = eth_price
 
-    execute_trade(signal_type=1, pair=long_leg, timestamp=timestamp, spread=spread, price=entry_price)
-    execute_trade(signal_type=-1, pair=short_leg, timestamp=timestamp, spread=spread, price=entry_price)
+    execute_trade(signal_type=1, pair=long_leg, timestamp=timestamp, spread=spread, price=long_price)
+    execute_trade(signal_type=-1, pair=short_leg, timestamp=timestamp, spread=spread, price=short_price)
     trade_id = f"{timestamp.isoformat()}_{signal_type}"
     active_trades[trade_id] = {
         "timestamp": timestamp,
         "signal": signal_type,
         "spread": spread,
-        "price": entry_price,
+        "price": long_price,
         "long": long_leg,
         "short": short_leg
     }
     return trade_id
 
-# ─── Smart Cluster Guard ───
+# ─── Guards ───
 def should_block_by_cluster(signal, regime):
     same_signals = [1 for _, s, _ in executed_signals if s == signal]
     max_allowed = 5 if regime == "volatile" else 3
     return len(same_signals) >= max_allowed
 
+def should_block_flip(new_signal, timestamp, min_seconds=60):
+    if last_signal["type"] is None:
+        return False
+    time_diff = (timestamp - last_signal["timestamp"]).total_seconds()
+    return new_signal != last_signal["type"] and time_diff < min_seconds
+
 # ─── Tick Handler ───
 ml_filter = MLFilter(model_path=MODEL_PATH)
+stability_buffer = deque(maxlen=3)
 
 def process_tick(timestamp: datetime, btc_price: float, eth_price: float, ethbtc_price: float):
-    spread, expected_direction = evaluate_triangle_paths(btc_price, eth_price, ethbtc_price)
+    global active_trade
+
+    implied_ethbtc = eth_price / btc_price
+    spread = implied_ethbtc - ethbtc_price
+    expected_direction = 1 if spread < 0 else -1
+
+    # ✅ Check for auto-clear
+    if active_trade:
+        _, _, trade_id = executed_signals[-1]
+        trade_info = active_trades.get(trade_id, {})
+        entry_spread = trade_info.get("spread")
+        if entry_spread and has_spread_reverted(spread, entry_spread):
+            logging.info(f"🔁 Spread reverted. Closing trade: {trade_id}")
+            active_trade = None
+            active_trades.pop(trade_id, None)
+        else:
+            return
 
     if abs(spread) < 1e-6:
-        return  # no opportunity
+        return
 
     temp_window = deque(maxlen=200)
     _ = generate_live_features(btc_price, eth_price, ethbtc_price, temp_window)
@@ -115,10 +141,21 @@ def process_tick(timestamp: datetime, btc_price: float, eth_price: float, ethbtc
     ])
 
     confidence, model_signal = ml_filter.predict_with_confidence(x_input)
+    stability_buffer.append(model_signal)
+    if not all(s == model_signal for s in stability_buffer):
+        return
+
+    if should_block_flip(model_signal, timestamp):
+        logging.info(f"⚠️ Flip-blocked: Prev={last_signal['type']} → New={model_signal} too soon")
+        return
 
     if confidence >= CONFIDENCE_THRESHOLD and model_signal == expected_direction and not should_block_by_cluster(model_signal, regime):
-        trade_id = execute_triangular_trade(model_signal, timestamp, spread, eth_price if model_signal == 1 else btc_price)
+        trade_id = execute_triangular_trade(model_signal, timestamp, spread, btc_price, eth_price)
         executed_signals.append((timestamp, model_signal, trade_id))
+        last_signal["type"] = model_signal
+        last_signal["timestamp"] = timestamp
+        last_signal["confidence"] = confidence
+        active_trade = trade_id
 
         log_signal_event(
             timestamp=timestamp,
@@ -126,21 +163,21 @@ def process_tick(timestamp: datetime, btc_price: float, eth_price: float, ethbtc
             confidence=confidence,
             model_signal=model_signal,
             final_decision=1,
-            reason="model_approved"
+            reason="grand_signal"
         )
-        logging.info(f"✅ APPROVED TRADE | {timestamp} | ID: {trade_id} | Signal: {model_signal} | Confidence: {confidence:.4f}")
+        logging.info(f"✅ GRAND SIGNAL | {timestamp} | ID: {trade_id} | Signal: {model_signal} | Conf: {confidence:.4f}")
 
     elif confidence >= CONFIDENCE_THRESHOLD and model_signal != expected_direction:
         logging.info(f"⚠️ DIRECTION MISMATCH | Signal: {model_signal}, Expected: {expected_direction}")
     elif should_block_by_cluster(model_signal, regime):
-        logging.info(f"🚫 BLOCKED BY CLUSTER GUARD | Signal: {model_signal}, Regime: {regime}")
+        logging.info(f"🚫 CLUSTER BLOCKED | Signal: {model_signal}, Regime: {regime}")
     else:
-        logging.info(f"❌ LOW CONFIDENCE | {confidence:.4f}")
+        logging.info(f"❌ REJECTED | Confidence: {confidence:.4f}")
 
 # ─── Launch ───
 async def main():
     logging.basicConfig(level=logging.INFO)
-    logging.info("🚀 XAlgo Smart Signal Engine Launching...")
+    logging.info("🚀 XAlgo Nexus – Grand Signal Engine Launching...")
     ingestor = BinanceIngestor()
     await ingestor.stream(process_tick)
 
