@@ -21,7 +21,7 @@ from data.binance_ingestor import BinanceIngestor
 # 🔧 Config
 # ─────────────────────────────────────────────
 MODEL_PATH = "ml_model/triangular_rf_model.pkl"
-CONFIDENCE_THRESHOLD = 0.90
+CONFIDENCE_THRESHOLD = 0.97
 executed_signals = deque(maxlen=10)
 
 WINDOW_MAP = {

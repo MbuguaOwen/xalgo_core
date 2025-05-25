@@ -1,5 +1,4 @@
-# Merged chunked preprocessing & feature generation
-# core/feature_pipeline.py – Feature Generator (Live + Batch)
+# core/feature_pipeline.py – Feature Generator (Live + Batch, Direction-Aligned)
 
 import pandas as pd
 import numpy as np
@@ -32,6 +31,9 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
     kalman_filtered = kalman.update(spread)
     ewma_filtered = ewma_mean.update(spread)
 
+    # ✅ Add expected direction logic (aligned with triple-barrier model)
+    direction = 1 if spread < 0 else -1
+
     return {
         "btc_usd": btc_price,
         "eth_usd": eth_price,
@@ -41,7 +43,8 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
         "spread_zscore": z_score,
         "vol_spread": vol_spread,
         "spread_kalman": kalman_filtered,
-        "spread_ewma": ewma_filtered
+        "spread_ewma": ewma_filtered,
+        "direction": direction
     }
 
 
