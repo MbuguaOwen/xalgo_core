@@ -1,4 +1,3 @@
-# adaptive_filters.py – EWMA and Kalman Filter Toolkit for Spread Normalization
 
 import numpy as np
 
@@ -14,6 +13,10 @@ class EWMA:
             self.value = self.alpha * x + (1 - self.alpha) * self.value
         return self.value
 
+    def reset(self, value=None):
+        self.value = value
+
+
 class KalmanFilter:
     def __init__(self, process_variance=1e-5, measurement_variance=1e-2):
         self.x = 0.0
@@ -22,10 +25,12 @@ class KalmanFilter:
         self.R = measurement_variance
 
     def update(self, z):
-        # Predict
         self.P = self.P + self.Q
-        # Update
         K = self.P / (self.P + self.R)
         self.x = self.x + K * (z - self.x)
         self.P = (1 - K) * self.P
         return self.x
+
+    def reset(self, x0=0.0, P0=1.0):
+        self.x = x0
+        self.P = P0

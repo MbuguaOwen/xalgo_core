@@ -1,4 +1,3 @@
-# utils/filters.py – MLFilter for Triangular Arbitrage (Binary Directional Model)
 
 import joblib
 import numpy as np
@@ -84,3 +83,19 @@ class MLFilter:
         except Exception as e:
             logging.error(f"[MLFilter] ❌ Prediction error: {e}")
             return 0.0, 0  # fallback: no trade
+
+    def predict(self, x_input: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
+        """
+        For use with models that return class directly (e.g., ETH/BTC selector).
+        Returns predicted class as-is.
+        """
+        try:
+            if isinstance(x_input, pd.DataFrame):
+                return self.model.predict(x_input)
+            elif isinstance(x_input, np.ndarray):
+                return self.model.predict(pd.DataFrame(x_input.reshape(1, -1)))
+            else:
+                raise TypeError("x_input must be a pandas DataFrame or numpy array")
+        except Exception as e:
+            logging.error(f"[MLFilter] ❌ Direct prediction error: {e}")
+            return np.array([-1])
