@@ -3,7 +3,7 @@
 import csv
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 LOG_FILE = "logs/signal_log.csv"
 os.makedirs("logs", exist_ok=True)
@@ -17,6 +17,14 @@ if not os.path.exists(LOG_FILE):
             "model_signal", "final_decision", "reason",
             "profit", "stop_loss_pct", "take_profit_pct"
         ])
+
+# ─── Timestamp Sanitizer ───────────────────────────────
+def ensure_datetime(ts):
+    if isinstance(ts, datetime):
+        return ts
+    elif isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    return datetime.utcnow().replace(tzinfo=timezone.utc)
 
 # ─── Log Signal Event ───────────────────────────────────
 def log_signal_event(
@@ -32,10 +40,13 @@ def log_signal_event(
     take_profit_pct=None
 ):
     try:
+        timestamp = ensure_datetime(timestamp)
+        iso_time = timestamp.isoformat()
+
         with open(LOG_FILE, mode="a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
-                timestamp,
+                iso_time,
                 round(entry_price, 8),
                 round(confidence, 4),
                 round(spread_zscore, 4) if spread_zscore is not None else "",

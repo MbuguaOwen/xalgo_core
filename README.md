@@ -1,81 +1,128 @@
-# XAlgo Core: Live ML-Based Triangular Arbitrage Bot
 
-## 📈 Overview
-XAlgo Core is a high-frequency trading system for live BTC/ETH/USDT triangular arbitrage using:
-- Real-time Binance WebSocket data
-- Machine learning–based execution logic
-- Sub-second signal filtering
-- Minimal architecture for low-latency deployment
+# 📈 XAlgoNexus – Triangular Arbitrage Intelligence Engine
+
+**XAlgoNexus** is an institutional-grade, real-time arbitrage engine designed for triangular trading opportunities in both **crypto** and **forex** markets.  
+It fuses statistical rigor, machine learning intelligence, and adaptive execution logic to identify and exploit short-term inefficiencies across pairs like BTC/ETH/USDT and GBP/USD/EUR.
 
 ---
 
-## ⚙️ Features
-- ✅ Binance WebSocket: real-time BTCUSDT, ETHUSDT, ETHBTC prices
-- ✅ Feature generation: spread, z-score, implied ETHBTC, vol_spread
-- ✅ ML signal scoring with calibrated confidence
-- ✅ Execution simulation (real trade integration ready)
-- ✅ Logs signals and executions in CSV format
+## 🚀 System Overview
+
+### ✅ Live Signal Engine
+- **Streaming Binance data**
+- **Feature generation** from BTCUSDT, ETHUSDT, ETHBTC
+- **Z-score + volatility-based filtering**
+- **ML gating** via confidence model
+- **ML-based cointegration classification**
+- **Best-leg selector** to choose BTC or ETH for trade
+- **Dynamic SL/TP** based on spread, volatility, regime
 
 ---
 
-## 🧱 Project Structure
-```
+## 🤖 Models Used
+
+| Model Path                           | Role                        |
+|--------------------------------------|-----------------------------|
+| `triangular_rf_model.pkl`            | Predicts confidence of reversion (–1 / +1) |
+| `cointegration_score_model.pkl`      | Classifies stability of the spread |
+| `pair_selector_model.pkl`            | Chooses best leg: BTC or ETH |
+| `regime_classifier.pkl` *(optional)* | Classifies market regime: flat, trending, volatile |
+
+---
+
+## 📂 Project Structure
+
+```bash
 .
 ├── core/
-│   ├── execution_engine.py      # Logs or executes trades
-│   ├── feature_pipeline.py      # Computes features from Binance ticks
-│   └── trade_logger.py          # Signal audit logger
-├── data/
-│   └── binance_ingestor.py      # Streams real-time data
+│   ├── feature_pipeline.py
+│   ├── kalman_cointegration_monitor.py
+│   ├── execution_engine.py
+│   └── adaptive_filters.py
 ├── utils/
-│   └── filters.py               # MLFilter using .pkl model
-├── models/                      # Contains triangular_rf_model.pkl
-├── logs/                        # Outputs: signal_log.csv, execution_log.csv
-├── main.py                      # Live engine entrypoint
-├── requirements.txt             # Python dependencies
-└── .gitignore                   # Clean repo practices
+│   └── filters.py
+├── data/
+│   ├── BTCUSDT.csv
+│   ├── ETHUSDT.csv
+│   └── ETHBTC.csv
+├── ml_model/
+│   ├── triangular_rf_model.pkl
+│   ├── cointegration_score_model.pkl
+│   ├── pair_selector_model.pkl
+│   └── regime_classifier.pkl
+├── logs/
+│   └── signal_log.csv
+├── main.py
+└── README.md
 ```
 
 ---
 
-## 🚀 Quickstart
+## 🧪 Training Pipelines
 
-### 1. Clone and Set Up Environment
-```bash
-git clone https://github.com/YOUR_USERNAME/xalgo_core.git
-cd xalgo_core
-python -m venv .venv
-. .venv/Scripts/activate  # or source .venv/bin/activate on Unix
-pip install -r requirements.txt
+Scripts to train each ML module:
+
+- `train_cointegration_score_model.py`
+- `train_pair_selector.py`
+- `train_regime_classifier.py`
+- `train_ml_filter_combined.py`
+
+All models are trained on engineered features from `features_cointegration_labeled.csv`.
+
+---
+
+## ⚙️ Signal Flow Diagram
+
+```text
+[Live Binance Prices]
+        ↓
+[Feature Generator] ← historical .csv also supported
+        ↓
+[Z-Score Filter] → [Regime Classifier (optional)]
+        ↓
+[ML Confidence Model] (triangular_rf_model.pkl)
+        ↓
+[ML Cointegration Model] (cointegration_score_model.pkl)
+        ↓
+[Best Leg Selector] (pair_selector_model.pkl)
+        ↓
+[Execute BTC or ETH Legs] → [Log Signal + SL/TP Risk]
 ```
 
-### 2. Run Live Trading Engine
+---
+
+## 📊 Outputs
+
+- Logged to: `logs/signal_log.csv`
+- Format: `timestamp, entry_price, confidence, model_signal, final_decision, reason, profit, stop_loss_pct, take_profit_pct`
+
+---
+
+## 📡 Coming Soon
+
+- ✅ Telegram/Discord alerts for high-confidence setups
+- ✅ Prometheus + Grafana dashboards
+- ✅ Automated backtesting + regime-aware evaluation
+- ✅ Real capital integration via Binance API
+
+---
+
+## 🧠 Built By
+
+> Owen Mbugua · Quant engineer @ XAlgo · 2025
+
+---
+
+## 📥 Get Started
+
+Install requirements and run:
 ```bash
 python main.py
 ```
-Logs will be saved to:
-- `logs/signal_log.csv`
-- `logs/execution_log.csv`
 
----
-
-## 🧠 ML Model Details
-The model used (`models/triangular_rf_model.pkl`) expects the following features:
-```python
-[
-  "btc_usd", "eth_usd", "eth_btc",
-  "implied_ethbtc", "spread", "spread_zscore", "vol_spread"
-]
+Or run a specific model trainer:
+```bash
+python train_cointegration_score_model.py
 ```
-It was trained to identify high-confidence profitable mean-reversion signals.
 
 ---
-
-## 📄 Notes
-- Currently runs in simulation mode (executes mock trades)
-- Ready for real order routing via Binance REST/FIX API
-- Prometheus/Grafana hooks coming soon
-
----
-
-© 2025 XAlgo Core — Precision. Speed. Profit.
