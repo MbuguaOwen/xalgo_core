@@ -22,9 +22,9 @@ from core.kalman_cointegration_monitor import KalmanCointegrationMonitor
 # ─── Config ───
 GATE_MODEL_PATH = "ml_model/triangular_rf_model.pkl"
 PAIR_MODEL_PATH = "ml_model/pair_selector_model.pkl"
-CONFIDENCE_THRESHOLD = 0.90
+CONFIDENCE_THRESHOLD = 0.85
 COINTEGRATION_THRESHOLD = 0.7
-ZSCORE_THRESHOLD = 1.3
+ZSCORE_THRESHOLD = 0.7
 MAX_HOLD_SECONDS = 300
 
 executed_signals = deque(maxlen=50)
