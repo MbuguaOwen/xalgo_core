@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – Boss-Level Reflex-Driven Adaptive ML Signal Engine
+# main.py – Quant-Grade Triangular Arbitrage ML Signal Engine (Production-Ready)
 
 import asyncio
 import logging
@@ -16,6 +16,43 @@ from core.feature_pipeline import generate_live_features
 from core.execution_engine import execute_trade, calculate_dynamic_sl_tp
 from core.trade_logger import log_signal_event
 from data.binance_ingestor import BinanceIngestor
+
+# ==== CONFIGURABLE USER THRESHOLDS ====
+MAX_HOLD_SECONDS = 1200
+MIN_SPREAD_MAGNITUDE = 0.0003
+MIN_SLOPE_MAGNITUDE = 0.0001
+ADJUSTED_ZSCORE_THRESHOLD = 0.7
+
+# Set to None for regime-adaptive (recommended), or float for override
+USER_CONFIDENCE_THRESHOLD = None  # E.g., 0.7 to be loose, 0.9 to be strict
+USER_COINTEGRATION_THRESHOLD = None  # E.g., 0.5 to be loose, 0.7+ strict
+
+# Model Paths
+GATE_MODEL_PATH = "ml_model/triangular_rf_model.pkl"
+PAIR_MODEL_PATH = "ml_model/pair_selector_model.pkl"
+COINT_MODEL_PATH = "ml_model/cointegration_score_model.pkl"
+REGIME_MODEL_PATH = "ml_model/regime_classifier.pkl"
+
+# Feature sets
+GATE_FEATURES = [
+    "spread", "spread_zscore", "vol_spread", "spread_kalman", "spread_ewma",
+    "btc_usd", "eth_usd", "eth_btc", "implied_ethbtc"
+]
+COINT_FEATURES = GATE_FEATURES + ["btc_vol", "eth_vol", "ethbtc_vol"]
+PAIR_FEATURES = [
+    "btc_usd", "eth_usd", "eth_btc", "implied_ethbtc", "spread", "spread_zscore",
+    "btc_vol", "eth_vol", "ethbtc_vol", "momentum_btc", "momentum_eth",
+    "rolling_corr", "vol_ratio", "spread_slope"
+]
+
+reverse_pair_map = {0: "BTC", 1: "ETH"}
+regime_map = {0: "flat", 1: "volatile", 2: "trending"}
+
+executed_signals = deque(maxlen=50)
+active_trades = {}
+active_trade = None
+last_signal = {"type": None, "timestamp": None, "confidence": 0.0}
+WINDOW = deque(maxlen=200)
 
 def ensure_datetime(ts):
     if isinstance(ts, datetime):
@@ -39,60 +76,47 @@ def get_adaptive_thresholds(regime: str, volatility: float, confidence_hint: flo
         coint = 0.7
     return round(z, 3), round(conf, 3), round(max(min(coint, 0.75), 0.5), 3)
 
-# Config
-GATE_FEATURES = [
-    "spread", "spread_zscore", "vol_spread", "spread_kalman", "spread_ewma",
-    "btc_usd", "eth_usd", "eth_btc", "implied_ethbtc"
-]
-COINT_FEATURES = GATE_FEATURES + ["btc_vol", "eth_vol", "ethbtc_vol"]
-PAIR_FEATURES = [
-    "btc_usd", "eth_usd", "eth_btc", "implied_ethbtc", "spread", "spread_zscore",
-    "btc_vol", "eth_vol", "ethbtc_vol", "momentum_btc", "momentum_eth",
-    "rolling_corr", "vol_ratio", "spread_slope"
-]
+def check_model_features(model, features_dict, model_name):
+    expected = set(model.feature_names_in_)
+    actual = set(features_dict.keys())
+    missing = expected - actual
+    if missing:
+        logging.critical(f"🚨 [FATAL] {model_name} missing required features: {missing}")
+        raise RuntimeError(f"{model_name}: Model expects features missing in current pipeline: {missing}")
 
-GATE_MODEL_PATH = "ml_model/triangular_rf_model.pkl"
-PAIR_MODEL_PATH = "ml_model/pair_selector_model.pkl"
-COINT_MODEL_PATH = "ml_model/cointegration_score_model.pkl"
-REGIME_MODEL_PATH = "ml_model/regime_classifier.pkl"
+def check_all_models_loaded():
+    # Try a dummy feature set to verify feature alignment on boot
+    dummy = {k: 1.0 for k in set(GATE_FEATURES + COINT_FEATURES + PAIR_FEATURES)}
+    for model, name in [
+        (confidence_filter.model, "Confidence Model"),
+        (cointegration_model.model, "Cointegration Model"),
+        (pair_selector.model, "Pair Selector Model"),
+        (regime_classifier.model, "Regime Classifier Model"),
+    ]:
+        check_model_features(model, dummy, name)
 
-MAX_HOLD_SECONDS = 300
-MIN_SPREAD_MAGNITUDE = 0.0005
-MIN_SLOPE_MAGNITUDE = 0.0003
-ADJUSTED_ZSCORE_THRESHOLD = 1.5
-
-executed_signals = deque(maxlen=50)
-active_trades = {}
-active_trade = None
-last_signal = {"type": None, "timestamp": None, "confidence": 0.0}
-WINDOW = deque(maxlen=200)
-
+# --- Load Models and Check Features at Startup ---
 confidence_filter = MLFilter(GATE_MODEL_PATH)
 pair_selector = MLFilter(PAIR_MODEL_PATH)
 cointegration_model = MLFilter(COINT_MODEL_PATH)
 regime_classifier = MLFilter(REGIME_MODEL_PATH)
-
-reverse_pair_map = {0: "BTC", 1: "ETH"}
-regime_map = {0: "flat", 1: "volatile", 2: "trending"}
+check_all_models_loaded()
 
 def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg, features, confidence):
     regime = features.get("regime", "flat")
     zscore = features.get("spread_zscore", 0.0)
     vol_spread = features.get("vol_spread", 0.001)
-
     stop_loss_pct, take_profit_pct = calculate_dynamic_sl_tp(
         spread_zscore=zscore,
         vol_spread=vol_spread,
         confidence=confidence,
         regime=regime
     )
-
+    # Execute only the selected leg
     if selected_leg == "ETH":
         execute_trade(1, "ETHUSDT", timestamp, spread, eth_price, zscore, vol_spread, confidence, regime)
-        execute_trade(-1, "BTCUSDT", timestamp, spread, btc_price, zscore, vol_spread, confidence, regime)
     else:
         execute_trade(1, "BTCUSDT", timestamp, spread, btc_price, zscore, vol_spread, confidence, regime)
-        execute_trade(-1, "ETHUSDT", timestamp, spread, eth_price, zscore, vol_spread, confidence, regime)
 
     trade_id = f"{timestamp.isoformat()}_{selected_leg}"
     active_trades[trade_id] = {
@@ -104,12 +128,12 @@ def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_l
         "sl": stop_loss_pct,
         "tp": take_profit_pct
     }
-
     log_signal_event(
         timestamp, spread, confidence, zscore, None, 1,
-        f"ml_cointegrated_trade_{selected_leg}", None, stop_loss_pct, take_profit_pct
+        f"ml_cointegrated_trade_{selected_leg}", None, stop_loss_pct, take_profit_pct,
+        spread_slope=features.get("spread_slope"),
+        regime=regime
     )
-
     return trade_id
 
 def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
@@ -119,44 +143,66 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     implied_ethbtc = eth_price / btc_price
     spread = implied_ethbtc - ethbtc_price
 
+    # Gate 1: Spread Magnitude
     if abs(spread) < MIN_SPREAD_MAGNITUDE:
-        log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_spread_too_small")
-        logging.info(f"🛑 VETO: Spread magnitude too small: {spread:.6f}")
+        log_signal_event(
+            timestamp, spread, 0.0, 0.0, None, 0, "veto_spread_too_small",
+            spread_slope=None, regime=None
+        )
+        logging.info(f"🛑 VETO: Spread magnitude too small: {spread:.8f} < {MIN_SPREAD_MAGNITUDE}")
         return
 
     features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOW)
     if not features:
-        log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_feature_fail")
+        log_signal_event(
+            timestamp, spread, 0.0, 0.0, None, 0, "veto_feature_fail",
+            spread_slope=None, regime=None
+        )
         logging.warning("❌ SKIPPED: Feature generation failed")
         return
 
-    spread_z = features["spread_zscore"]
+    spread_z = features.get("spread_zscore", 0.0)
     volatility = features.get("vol_spread", 0.001)
     spread_slope = features.get("spread_slope", 0.0)
 
+    # --- Regime Classification ---
     regime_input = pd.DataFrame([features]).reindex(columns=regime_classifier.model.feature_names_in_)
     regime_code = regime_classifier.predict(regime_input)[0]
     regime = regime_map.get(regime_code, "flat")
     features["regime"] = regime
 
-    zscore_threshold, confidence_threshold, cointegration_threshold = get_adaptive_thresholds(regime, volatility)
+    # --- Thresholds ---
+    zscore_threshold, default_confidence_threshold, default_cointegration_threshold = get_adaptive_thresholds(regime, volatility)
+    confidence_threshold = USER_CONFIDENCE_THRESHOLD if USER_CONFIDENCE_THRESHOLD is not None else default_confidence_threshold
+    cointegration_threshold = USER_COINTEGRATION_THRESHOLD if USER_COINTEGRATION_THRESHOLD is not None else default_cointegration_threshold
 
+    # --- Veto Gates ---
     if abs(spread_z) < zscore_threshold:
-        log_signal_event(timestamp, spread, 0.0, spread_z, None, 0, "veto_zscore_low", regime=regime)
+        log_signal_event(
+            timestamp, spread, 0.0, spread_z, None, 0, "veto_zscore_low",
+            spread_slope=spread_slope, regime=regime
+        )
         logging.info(f"🛑 VETO: Z-score too low: {spread_z:.2f} < {zscore_threshold}")
         return
 
     if abs(spread_slope) < MIN_SLOPE_MAGNITUDE:
-        log_signal_event(timestamp, spread, 0.0, spread_z, None, 0, "veto_slope_low", regime=regime)
+        log_signal_event(
+            timestamp, spread, 0.0, spread_z, None, 0, "veto_slope_low",
+            spread_slope=spread_slope, regime=regime
+        )
         logging.info(f"🛑 VETO: Spread slope too flat: {spread_slope:.6f} < {MIN_SLOPE_MAGNITUDE}")
         return
 
-    adjusted_zscore = abs(spread_z) * confidence_threshold
+    adjusted_zscore = abs(spread_z) * (confidence_threshold or 1.0)
     if adjusted_zscore < ADJUSTED_ZSCORE_THRESHOLD:
-        log_signal_event(timestamp, spread, 0.0, spread_z, None, 0, "veto_adjusted_zscore", regime=regime)
+        log_signal_event(
+            timestamp, spread, 0.0, spread_z, None, 0, "veto_adjusted_zscore",
+            spread_slope=spread_slope, regime=regime, adjusted_zscore=adjusted_zscore
+        )
         logging.info(f"🛑 VETO: Adjusted Z-score too weak: {adjusted_zscore:.2f} < {ADJUSTED_ZSCORE_THRESHOLD}")
         return
 
+    # --- Exit handling for open trade ---
     if active_trade:
         _, _, trade_id = executed_signals[-1]
         trade_info = active_trades.get(trade_id, {})
@@ -168,7 +214,9 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             profit_pct = (abs(entry_spread) - abs(spread)) / abs(entry_spread)
             log_signal_event(timestamp, entry_spread, last_signal["confidence"], spread_z,
                              None, 1, "reverted_exit", profit_pct,
-                             trade_info.get("sl"), trade_info.get("tp"))
+                             trade_info.get("sl"), trade_info.get("tp"),
+                             spread_slope=spread_slope, regime=regime
+            )
             logging.info(f"💰 EXIT: {trade_id} | Profit={profit_pct:.2%}")
             active_trades.pop(trade_id, None)
             active_trade = None
@@ -178,29 +226,42 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             profit_pct = (abs(entry_spread) - abs(spread)) / abs(entry_spread)
             log_signal_event(timestamp, entry_spread, last_signal["confidence"], spread_z,
                              None, 0 if profit_pct < 0 else 1, "forced_exit", profit_pct,
-                             trade_info.get("sl"), trade_info.get("tp"))
+                             trade_info.get("sl"), trade_info.get("tp"),
+                             spread_slope=spread_slope, regime=regime
+            )
             logging.warning(f"⏱️ TIMEOUT: {trade_id} | Age={age}s")
             active_trades.pop(trade_id, None)
             active_trade = None
             return
-
         return
 
+    # --- ML Confidence Gate ---
     gate_input = pd.DataFrame([features]).reindex(columns=confidence_filter.model.feature_names_in_)
+    check_model_features(confidence_filter.model, features, "Confidence Model")
     confidence, _ = confidence_filter.predict_with_confidence(gate_input)
     if confidence < confidence_threshold:
-        log_signal_event(timestamp, spread, confidence, spread_z, None, 0, "veto_confidence_low", regime=regime)
+        log_signal_event(
+            timestamp, spread, confidence, spread_z, None, 0, "veto_confidence_low",
+            spread_slope=spread_slope, regime=regime, confidence_threshold=confidence_threshold
+        )
         logging.info(f"🛑 VETO: Confidence too low: {confidence:.4f} < {confidence_threshold}")
         return
 
+    # --- ML Cointegration Gate ---
     coint_input = pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_)
+    check_model_features(cointegration_model.model, features, "Cointegration Model")
     coint_score, _ = cointegration_model.predict_with_confidence(coint_input)
     if coint_score < cointegration_threshold:
-        log_signal_event(timestamp, spread, confidence, spread_z, None, 0, "veto_cointegration_low", regime=regime)
+        log_signal_event(
+            timestamp, spread, confidence, spread_z, None, 0, "veto_cointegration_low",
+            spread_slope=spread_slope, regime=regime, coint_score=coint_score
+        )
         logging.info(f"🛑 VETO: Cointegration too weak: {coint_score:.4f} < {cointegration_threshold}")
         return
 
+    # --- ML Pair/Leader Gate ---
     pair_input = pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_)
+    check_model_features(pair_selector.model, features, "Pair Selector Model")
     pair_code = pair_selector.predict(pair_input)[0]
     selected_leg = reverse_pair_map.get(pair_code)
 
