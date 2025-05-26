@@ -1,4 +1,4 @@
-# core/execution_engine.py – Final Execution with Smart SL/TP & Logging
+# core/execution_engine.py – Final Execution with Smart SL/TP & Enhanced Logging
 
 import logging
 from datetime import datetime
@@ -17,7 +17,7 @@ def calculate_dynamic_sl_tp(spread_zscore, vol_spread, confidence, regime=None):
     # Boost TP if confidence is strong
     conf_boost = 1 + max(confidence - 0.85, 0) * 2
 
-    # Optional: bias for regime (trending can run)
+    # Optional: bias for regime (trending can run more)
     regime_bias = 1.2 if regime == "trending" else 1.0
 
     dynamic_sl = base_sl * vol_multiplier
@@ -26,9 +26,17 @@ def calculate_dynamic_sl_tp(spread_zscore, vol_spread, confidence, regime=None):
     return round(dynamic_sl, 4), round(dynamic_tp, 4)
 
 # ─── Main Execution Logger ─────────────────────────────────────────────
-def execute_trade(signal_type: int, pair: str, timestamp: datetime, spread: float, price: float,
-                  spread_zscore=0.0, vol_spread=0.001, confidence=0.85, regime="flat"):
-    
+def execute_trade(
+    signal_type: int,
+    pair: str,
+    timestamp: datetime,
+    spread: float,
+    price: float,
+    spread_zscore=0.0,
+    vol_spread=0.001,
+    confidence=0.85,
+    regime="flat"
+):
     action = {1: "BUY", -1: "SELL", 0: "HOLD"}.get(signal_type, "UNKNOWN")
     color = {"BUY": "green", "SELL": "red", "HOLD": "yellow"}.get(action, "white")
 
@@ -59,8 +67,8 @@ def execute_trade(signal_type: int, pair: str, timestamp: datetime, spread: floa
     try:
         with open(log_path, mode="a", newline="") as f:
             if new_file:
-                f.write("timestamp,action,pair,price,spread,stop_loss_pct,take_profit_pct,confidence,regime\n")
+                f.write("timestamp,action,pair,price,spread,spread_zscore,stop_loss_pct,take_profit_pct,confidence,regime\n")
             f.write(f"{local_time},{action},{pair},{price:.2f},{spread:.8f},"
-                    f"{stop_loss_pct:.4f},{take_profit_pct:.4f},{confidence:.4f},{regime}\n")
+                    f"{spread_zscore:.4f},{stop_loss_pct:.4f},{take_profit_pct:.4f},{confidence:.4f},{regime}\n")
     except Exception as e:
         logging.error(f"❌ Failed to write to execution_log.csv: {e}")

@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python
-# main.py – Hybrid Engine: Enhanced Veto Logs + Z-Score + Cointegration + Confidence + Leg Selector
+# main.py – Hybrid Engine: ML-Gated + Cointegration-Model + Dynamic SL/TP + Leg Selector
 
 import asyncio
 import logging
@@ -14,18 +14,18 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 from utils.filters import MLFilter
 from core.feature_pipeline import generate_live_features
-from core.execution_engine import execute_trade
+from core.execution_engine import execute_trade, calculate_dynamic_sl_tp
 from core.trade_logger import log_signal_event
 from data.binance_ingestor import BinanceIngestor
-from core.kalman_cointegration_monitor import KalmanCointegrationMonitor
 
 # ─── Config ───
 GATE_MODEL_PATH = "ml_model/triangular_rf_model.pkl"
 PAIR_MODEL_PATH = "ml_model/pair_selector_model.pkl"
-CONFIDENCE_THRESHOLD = 0.85
-COINTEGRATION_THRESHOLD = 0.7
-ZSCORE_THRESHOLD = 0.7
-MAX_HOLD_SECONDS = 300
+COINT_MODEL_PATH = "ml_model/cointegration_score_model.pkl"
+
+CONFIDENCE_THRESHOLD = 0.97
+ZSCORE_THRESHOLD = 1.5
+MAX_HOLD_SECONDS = 600 
 
 executed_signals = deque(maxlen=50)
 active_trades = {}
@@ -36,17 +36,28 @@ WINDOW = deque(maxlen=200)
 # ─── Filters ───
 confidence_filter = MLFilter(GATE_MODEL_PATH)
 pair_selector = MLFilter(PAIR_MODEL_PATH)
-cointegration_monitor = KalmanCointegrationMonitor()
+cointegration_model = MLFilter(COINT_MODEL_PATH)
 reverse_pair_map = {0: "BTC", 1: "ETH"}
 
 # ─── Trade Execution ───
-def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg):
+def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg, features, confidence):
+    regime = features.get("regime", "flat")
+    zscore = features.get("spread_zscore", 0.0)
+    vol_spread = features.get("vol_spread", 0.001)
+
+    stop_loss_pct, take_profit_pct = calculate_dynamic_sl_tp(
+        spread_zscore=zscore,
+        vol_spread=vol_spread,
+        confidence=confidence,
+        regime=regime
+    )
+
     if selected_leg == "ETH":
-        execute_trade(signal_type=1, pair="ETHUSDT", timestamp=timestamp, spread=spread, price=eth_price)
-        execute_trade(signal_type=-1, pair="BTCUSDT", timestamp=timestamp, spread=spread, price=btc_price)
+        execute_trade(1, "ETHUSDT", timestamp, spread, eth_price, zscore, vol_spread, confidence, regime)
+        execute_trade(-1, "BTCUSDT", timestamp, spread, btc_price, zscore, vol_spread, confidence, regime)
     elif selected_leg == "BTC":
-        execute_trade(signal_type=1, pair="BTCUSDT", timestamp=timestamp, spread=spread, price=btc_price)
-        execute_trade(signal_type=-1, pair="ETHUSDT", timestamp=timestamp, spread=spread, price=eth_price)
+        execute_trade(1, "BTCUSDT", timestamp, spread, btc_price, zscore, vol_spread, confidence, regime)
+        execute_trade(-1, "ETHUSDT", timestamp, spread, eth_price, zscore, vol_spread, confidence, regime)
 
     trade_id = f"{timestamp.isoformat()}_{selected_leg}"
     active_trades[trade_id] = {
@@ -54,8 +65,23 @@ def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_l
         "leg": selected_leg,
         "spread": spread,
         "btc_price": btc_price,
-        "eth_price": eth_price
+        "eth_price": eth_price,
+        "sl": stop_loss_pct,
+        "tp": take_profit_pct
     }
+
+    log_signal_event(
+        timestamp=timestamp,
+        entry_price=spread,
+        confidence=confidence,
+        spread_zscore=zscore,
+        model_signal=None,
+        final_decision=1,
+        reason=f"ml_cointegrated_trade_{selected_leg}",
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct
+    )
+
     return trade_id
 
 # ─── Tick Handler ───
@@ -88,7 +114,11 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
         if entry_spread and abs(spread) < abs(entry_spread) * 0.5:
             profit_pct = (abs(entry_spread) - abs(spread)) / abs(entry_spread)
-            log_signal_event(timestamp, entry_spread, last_signal["confidence"], None, 1, "reverted_exit", profit_pct)
+            log_signal_event(
+                timestamp, entry_spread, last_signal["confidence"], spread_z,
+                None, 1, "reverted_exit", profit_pct,
+                trade_info.get("sl"), trade_info.get("tp")
+            )
             logging.info(f"💰 EXIT | {trade_id} | Entry: {entry_spread:.5f} → Exit: {spread:.5f} | PnL: {profit_pct:.4%}")
             active_trades.pop(trade_id, None)
             active_trade = None
@@ -96,7 +126,11 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
         if age > MAX_HOLD_SECONDS:
             profit_pct = (abs(entry_spread) - abs(spread)) / abs(entry_spread)
-            log_signal_event(timestamp, entry_spread, last_signal["confidence"], None, 0 if profit_pct < 0 else 1, "forced_exit", profit_pct)
+            log_signal_event(
+                timestamp, entry_spread, last_signal["confidence"], spread_z,
+                None, 0 if profit_pct < 0 else 1, "forced_exit", profit_pct,
+                trade_info.get("sl"), trade_info.get("tp")
+            )
             logging.warning(f"⏱️ TIMEOUT | {trade_id} | Held: {age:.1f}s | PnL: {profit_pct:.4%}")
             active_trades.pop(trade_id, None)
             active_trade = None
@@ -117,9 +151,19 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         logging.info(f"🛑 VETOED: Confidence too low ({confidence:.4f} < {CONFIDENCE_THRESHOLD})")
         return
 
-    stability_score = cointegration_monitor.update(spread)
-    if stability_score < COINTEGRATION_THRESHOLD:
-        logging.info(f"🛑 VETOED: Cointegration stability too low ({stability_score:.2f} < {COINTEGRATION_THRESHOLD})")
+    # 🧠 ML Cointegration filter replaces hard-coded threshold
+    cointegration_input = pd.DataFrame([[features[k] for k in [
+        "spread", "spread_zscore", "vol_spread", "spread_ewma", "spread_kalman",
+        "btc_usd", "eth_usd", "eth_btc", "implied_ethbtc",
+        "btc_vol", "eth_vol", "ethbtc_vol"
+    ]]], columns=[
+        "spread", "spread_zscore", "vol_spread", "spread_ewma", "spread_kalman",
+        "btc_usd", "eth_usd", "eth_btc", "implied_ethbtc",
+        "btc_vol", "eth_vol", "ethbtc_vol"
+    ])
+    conf_cointegration, _ = cointegration_model.predict_with_confidence(cointegration_input)
+    if conf_cointegration < 0.5:
+        logging.info(f"🛑 VETOED: ML cointegration score too low ({conf_cointegration:.4f})")
         return
 
     required_pair_features = [
@@ -136,20 +180,19 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     pair_code = pair_selector.predict(pair_input)[0]
     selected_leg = reverse_pair_map.get(pair_code)
 
-    logging.info(f"🧠 SIGNAL APPROVED: leg={selected_leg} | z={spread_z:.2f} | conf={confidence:.4f} | stab={stability_score:.2f}")
+    logging.info(f"🧠 SIGNAL APPROVED: leg={selected_leg} | z={spread_z:.2f} | conf={confidence:.4f} | ml_coint={conf_cointegration:.4f}")
 
-    trade_id = execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg)
+    trade_id = execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg, features, confidence)
     executed_signals.append((timestamp, selected_leg, trade_id))
     last_signal.update({"type": selected_leg, "timestamp": timestamp, "confidence": confidence})
     active_trade = trade_id
 
-    log_signal_event(timestamp, spread, confidence, None, 1, f"cointegrated_trade_{selected_leg}")
-    logging.info(f"✅ EXECUTED | {selected_leg} | Conf: {confidence:.4f} | z={spread_z:.2f} | Stab: {stability_score:.2f} | ID: {trade_id}")
+    logging.info(f"✅ EXECUTED | {selected_leg} | Conf: {confidence:.4f} | z={spread_z:.2f} | ML_Coint: {conf_cointegration:.4f} | ID: {trade_id}")
 
 # ─── Launch ───
 async def main():
     logging.basicConfig(level=logging.INFO)
-    logging.info("🚀 XAlgo Nexus – Final Z-Score-Gated Cointegrated Pair Selector Running")
+    logging.info("🚀 XAlgo Nexus – ML-Gated Signal Engine with Trained Cointegration Filter")
     ingestor = BinanceIngestor()
     await ingestor.stream(process_tick)
 
