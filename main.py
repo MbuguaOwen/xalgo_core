@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – Quant-Grade Triangular Arbitrage ML Signal Engine (BUY & SELL Ready)
+# main.py – Quant-Grade Triangular Arbitrage ML Signal Engine (BUY & SELL Ready, Single Best Alpha Only)
 
 import asyncio
 import logging
@@ -200,7 +200,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         logging.info(f"🛑 VETO: Adjusted Z-score too weak: {adjusted_zscore:.2f} < {ADJUSTED_ZSCORE_THRESHOLD}")
         return
 
-    # --- Exit handling for open trade ---
+    # --- EXIT HANDLING (Only 1 trade at a time; cluster guard) ---
     if active_trade:
         _, _, trade_id = executed_signals[-1]
         trade_info = active_trades.get(trade_id, {})
@@ -231,6 +231,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             active_trades.pop(trade_id, None)
             active_trade = None
             return
+        # Cluster guard: don't open new trade if one is active
         return
 
     # --- ML Confidence Gate ---
