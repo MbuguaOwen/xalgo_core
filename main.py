@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – Quant-Grade Triangular Arbitrage ML Signal Engine (Production-Ready)
+# main.py – Quant-Grade Triangular Arbitrage ML Signal Engine (BUY & SELL Ready)
 
 import asyncio
 import logging
@@ -19,21 +19,18 @@ from data.binance_ingestor import BinanceIngestor
 
 # ==== CONFIGURABLE USER THRESHOLDS ====
 MAX_HOLD_SECONDS = 1200
-MIN_SPREAD_MAGNITUDE = 0.0003
-MIN_SLOPE_MAGNITUDE = 0.0001
-ADJUSTED_ZSCORE_THRESHOLD = 0.7
+MIN_SPREAD_MAGNITUDE = 0.0000
+MIN_SLOPE_MAGNITUDE = 0.0000
+ADJUSTED_ZSCORE_THRESHOLD = 0.0
 
-# Set to None for regime-adaptive (recommended), or float for override
-USER_CONFIDENCE_THRESHOLD = None  # E.g., 0.7 to be loose, 0.9 to be strict
-USER_COINTEGRATION_THRESHOLD = None  # E.g., 0.5 to be loose, 0.7+ strict
+USER_CONFIDENCE_THRESHOLD = None  # None for adaptive, or float for override
+USER_COINTEGRATION_THRESHOLD = None
 
-# Model Paths
 GATE_MODEL_PATH = "ml_model/triangular_rf_model.pkl"
 PAIR_MODEL_PATH = "ml_model/pair_selector_model.pkl"
 COINT_MODEL_PATH = "ml_model/cointegration_score_model.pkl"
 REGIME_MODEL_PATH = "ml_model/regime_classifier.pkl"
 
-# Feature sets
 GATE_FEATURES = [
     "spread", "spread_zscore", "vol_spread", "spread_kalman", "spread_ewma",
     "btc_usd", "eth_usd", "eth_btc", "implied_ethbtc"
@@ -85,7 +82,6 @@ def check_model_features(model, features_dict, model_name):
         raise RuntimeError(f"{model_name}: Model expects features missing in current pipeline: {missing}")
 
 def check_all_models_loaded():
-    # Try a dummy feature set to verify feature alignment on boot
     dummy = {k: 1.0 for k in set(GATE_FEATURES + COINT_FEATURES + PAIR_FEATURES)}
     for model, name in [
         (confidence_filter.model, "Confidence Model"),
@@ -102,7 +98,7 @@ cointegration_model = MLFilter(COINT_MODEL_PATH)
 regime_classifier = MLFilter(REGIME_MODEL_PATH)
 check_all_models_loaded()
 
-def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg, features, confidence):
+def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg, features, confidence, direction):
     regime = features.get("regime", "flat")
     zscore = features.get("spread_zscore", 0.0)
     vol_spread = features.get("vol_spread", 0.001)
@@ -112,16 +108,16 @@ def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_l
         confidence=confidence,
         regime=regime
     )
-    # Execute only the selected leg
     if selected_leg == "ETH":
-        execute_trade(1, "ETHUSDT", timestamp, spread, eth_price, zscore, vol_spread, confidence, regime)
+        execute_trade(direction, "ETHUSDT", timestamp, spread, eth_price, zscore, vol_spread, confidence, regime)
     else:
-        execute_trade(1, "BTCUSDT", timestamp, spread, btc_price, zscore, vol_spread, confidence, regime)
+        execute_trade(direction, "BTCUSDT", timestamp, spread, btc_price, zscore, vol_spread, confidence, regime)
 
-    trade_id = f"{timestamp.isoformat()}_{selected_leg}"
+    trade_id = f"{timestamp.isoformat()}_{selected_leg}_{'BUY' if direction==1 else 'SELL' if direction==-1 else 'HOLD'}"
     active_trades[trade_id] = {
         "timestamp": timestamp,
         "leg": selected_leg,
+        "direction": direction,
         "spread": spread,
         "btc_price": btc_price,
         "eth_price": eth_price,
@@ -129,8 +125,10 @@ def execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_l
         "tp": take_profit_pct
     }
     log_signal_event(
-        timestamp, spread, confidence, zscore, None, 1,
-        f"ml_cointegrated_trade_{selected_leg}", None, stop_loss_pct, take_profit_pct,
+        timestamp, spread, confidence, zscore, direction,
+        1 if direction != 0 else 0,
+        f"ml_cointegrated_trade_{selected_leg}_{'BUY' if direction==1 else 'SELL' if direction==-1 else 'HOLD'}",
+        None, stop_loss_pct, take_profit_pct,
         spread_slope=features.get("spread_slope"),
         regime=regime
     )
@@ -213,7 +211,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         if entry_spread and abs(spread) < abs(entry_spread) * 0.5:
             profit_pct = (abs(entry_spread) - abs(spread)) / abs(entry_spread)
             log_signal_event(timestamp, entry_spread, last_signal["confidence"], spread_z,
-                             None, 1, "reverted_exit", profit_pct,
+                             trade_info.get("direction", 1), 1, "reverted_exit", profit_pct,
                              trade_info.get("sl"), trade_info.get("tp"),
                              spread_slope=spread_slope, regime=regime
             )
@@ -225,7 +223,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         if age > MAX_HOLD_SECONDS:
             profit_pct = (abs(entry_spread) - abs(spread)) / abs(entry_spread)
             log_signal_event(timestamp, entry_spread, last_signal["confidence"], spread_z,
-                             None, 0 if profit_pct < 0 else 1, "forced_exit", profit_pct,
+                             trade_info.get("direction", 1), 0 if profit_pct < 0 else 1, "forced_exit", profit_pct,
                              trade_info.get("sl"), trade_info.get("tp"),
                              spread_slope=spread_slope, regime=regime
             )
@@ -238,10 +236,20 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     # --- ML Confidence Gate ---
     gate_input = pd.DataFrame([features]).reindex(columns=confidence_filter.model.feature_names_in_)
     check_model_features(confidence_filter.model, features, "Confidence Model")
-    confidence, _ = confidence_filter.predict_with_confidence(gate_input)
+    confidence, direction = confidence_filter.predict_with_confidence(gate_input)
+    # direction: -1 (SELL), 1 (BUY), 0 (HOLD)
+
+    if direction == 0:
+        log_signal_event(
+            timestamp, spread, confidence, spread_z, direction, 0, "veto_direction_hold",
+            spread_slope=spread_slope, regime=regime
+        )
+        logging.info("🛑 VETO: Model signaled HOLD (direction == 0)")
+        return
+
     if confidence < confidence_threshold:
         log_signal_event(
-            timestamp, spread, confidence, spread_z, None, 0, "veto_confidence_low",
+            timestamp, spread, confidence, spread_z, direction, 0, "veto_confidence_low",
             spread_slope=spread_slope, regime=regime, confidence_threshold=confidence_threshold
         )
         logging.info(f"🛑 VETO: Confidence too low: {confidence:.4f} < {confidence_threshold}")
@@ -253,7 +261,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     coint_score, _ = cointegration_model.predict_with_confidence(coint_input)
     if coint_score < cointegration_threshold:
         log_signal_event(
-            timestamp, spread, confidence, spread_z, None, 0, "veto_cointegration_low",
+            timestamp, spread, confidence, spread_z, direction, 0, "veto_cointegration_low",
             spread_slope=spread_slope, regime=regime, coint_score=coint_score
         )
         logging.info(f"🛑 VETO: Cointegration too weak: {coint_score:.4f} < {cointegration_threshold}")
@@ -265,7 +273,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     pair_code = pair_selector.predict(pair_input)[0]
     selected_leg = reverse_pair_map.get(pair_code)
 
-    trade_id = execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg, features, confidence)
+    trade_id = execute_single_leg_trade(timestamp, spread, btc_price, eth_price, selected_leg, features, confidence, direction)
     executed_signals.append((timestamp, selected_leg, trade_id))
     last_signal.update({"type": selected_leg, "timestamp": timestamp, "confidence": confidence})
     active_trade = trade_id
